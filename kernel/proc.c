@@ -170,6 +170,7 @@ freeproc(struct proc *p)
     pkvmfree(p->kernelpgt);
   
   p->pagetable = 0;
+  p->kernelpgt = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -265,6 +266,7 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  u2kvmcopy(p->pagetable, p->kernelpgt, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -290,6 +292,7 @@ growproc(int n)
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    u2kvmcopy(p->pagetable, p->kernelpgt, sz - n, sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
@@ -332,6 +335,8 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  u2kvmcopy(np->pagetable, np->kernelpgt, 0, np->sz);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 

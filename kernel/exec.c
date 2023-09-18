@@ -70,10 +70,15 @@ exec(char *path, char **argv)
   uint64 sz1;
   if((sz1 = uvmalloc(pagetable, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
+  if(sz1 >= PLIC)
+    goto bad;
   sz = sz1;
   uvmclear(pagetable, sz-2*PGSIZE);
   sp = sz;
   stackbase = sp - PGSIZE;
+
+  // call u2kvmcopy after user stack is set up
+  u2kvmcopy(pagetable, p->kernelpgt, 0, sz);
 
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {

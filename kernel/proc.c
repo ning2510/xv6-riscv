@@ -274,6 +274,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->flags = p->flags;
 
   np->parent = p;
 

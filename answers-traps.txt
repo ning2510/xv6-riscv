@@ -1,0 +1,7 @@
+1. a0-a7
+2. a2
+3. compiler optimized to store the return value of f as instant number
+4. 0x616
+5. 0x38
+6. HE110 World   如果是大端，i 应为 0x726c6400   不需要修改 57616
+7. a random number 

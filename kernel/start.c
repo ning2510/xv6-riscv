@@ -34,6 +34,11 @@ start()
   w_satp(0);
 
   // delegate all interrupts and exceptions to supervisor mode.
+  // 将中断和异常的处理权全部委派给了 Supervisor 模式
+  // 向 medeleg 和 mideleg 两个寄存器写入全 1, 实现了外部中断和异常的委派
+  // 这也就意味着，在 xv6 系统中发生的外部中断和异常(不包括时钟中断和软中断，
+  // 它们默认被硬连线到 M-Mode 中断) 都将会被 S-Mode 下的操作系统接管，
+  // 不会呈递到 M-Mode 来处理
   w_medeleg(0xffff);
   w_mideleg(0xffff);
   w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);

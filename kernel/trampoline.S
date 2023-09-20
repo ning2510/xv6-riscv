@@ -26,6 +26,9 @@ uservec:
         
 	# swap a0 and sscratch
         # so that a0 is TRAPFRAME
+        # csrrw 的用法：csrrw rd, csr, rs1
+        # csrrw 的作用：t = CSRs[csr], CSRs[csr] = x[rs1], x[rd] = t
+        # 下面这条指令的作用即：t = sscratch, sscratch = a0, a0 = t
         csrrw a0, sscratch, a0
 
         # save the user registers in TRAPFRAME
@@ -61,6 +64,7 @@ uservec:
         sd t6, 280(a0)
 
 	# save the user a0 in p->trapframe->a0
+        # 将用户态传入的第一个参数 a0 存到 p->trapframe->a0
         csrr t0, sscratch
         sd t0, 112(a0)
 

@@ -218,7 +218,9 @@ userinit(void)
   
   // allocate one user page and copy init's instructions
   // and data into it.
+  // 进程的虚拟地址是从 0 开始的
   uvminit(p->pagetable, initcode, sizeof(initcode));
+  // p->sz 代表的是当前进程申请内存的总量 (uvminit 中只申请了一页)
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -699,6 +701,9 @@ int
 lazy_allocate(uint64 va)
 {
   struct proc *p = myproc();
+  // 进程的虚拟地址是从 0 开始的, 进程的栈空间是从 高地址 -> 低地址 增长的
+  // p->trapframe->sp 栈顶 (低地址), p->sz 为当前进程申请的内存总量
+  // 进程空间在 userinit() 和 exec() 中被初始化, 详见 docs 中文档
   if(va < p->trapframe->sp || va >= p->sz)
     return -1;
   

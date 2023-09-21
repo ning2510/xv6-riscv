@@ -69,9 +69,8 @@ usertrap(void)
     // ok
   } else if(r_scause() == 13 || r_scause() == 15) {
     uint64 va = r_stval();
-    // if(va >= p->trapframe->sp || va < p->trapframe->sp)
-    //   goto bad;
 
+    // 判断 va 是否有效，包括判断 va 是否在 stack 的 guard page 上
     if(va >= MAXVA || (va <= PGROUNDDOWN(p->trapframe->sp) 
         && va >= PGROUNDDOWN(p->trapframe->sp) - PGSIZE)) {
         goto bad;

@@ -67,7 +67,22 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    uint64 va = r_stval();
+    // if(va >= p->trapframe->sp || va < p->trapframe->sp)
+    //   goto bad;
+
+    if(va >= MAXVA || (va <= PGROUNDDOWN(p->trapframe->sp) 
+        && va >= PGROUNDDOWN(p->trapframe->sp) - PGSIZE)) {
+        goto bad;
+    }
+
+    if(cow_alloc(p->pagetable, va) != 0) {
+      goto bad;
+    }
+
   } else {
+bad:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -218,3 +233,31 @@ devintr()
   }
 }
 
+int
+cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  if(va >= MAXVA)
+    return -1;
+
+  va = PGROUNDDOWN(va);
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0)
+    return -1;
+  
+  uint64 pa = PTE2PA(*pte);
+  if(pa == 0)
+    return -1;
+
+  uint flags = PTE_FLAGS(*pte);
+  if(flags & PTE_COW) {
+    char *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    
+    memmove(mem, (char *)pa, PGSIZE);
+    flags = (flags & (~PTE_COW)) | PTE_W;
+    *pte = PA2PTE((uint64)mem) | flags;
+    kfree((void *)pa);
+  }
+  return 0;
+}

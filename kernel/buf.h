@@ -4,8 +4,8 @@ struct buf {
   uint dev;
   uint blockno;
   struct sleeplock lock;
-  uint refcnt;
-  struct buf *prev; // LRU cache list
+  uint timestamp;
+  uint refcnt;      // 每个块缓冲区的引用计数
   struct buf *next;
   uchar data[BSIZE];
 };

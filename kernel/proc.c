@@ -280,6 +280,16 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
+  for(int i = 0; i < MAXVMA; i++) {
+    struct vma *pvma = &p->pvma[i];
+    struct vma *cvma = &np->pvma[i];
+    if(pvma->valid) {
+      memmove(cvma, pvma, sizeof(struct vma));
+      filedup(cvma->f);
+    }
+  }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -350,6 +360,14 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  struct vma *pvma = p->pvma;
+  for(int i = 0; i < MAXVMA; i++) {
+    if(pvma->valid) {
+      uvmunmap(p->pagetable, pvma[i].addr, pvma[i].length / PGSIZE, 0);
+      memset(&pvma[i], 0, sizeof(struct vma));
     }
   }
 

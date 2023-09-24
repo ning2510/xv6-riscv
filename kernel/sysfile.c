@@ -484,3 +484,137 @@ sys_pipe(void)
   }
   return 0;
 }
+
+int
+mmap_filewrite(struct file *f, uint64 addr, int n, uint off)
+{
+  int r, ret = 0;
+
+  if(f->writable == 0)
+    return -1;
+
+  if(f->type == FD_PIPE){
+    ret = pipewrite(f->pipe, addr, n);
+  } else if(f->type == FD_DEVICE){
+    if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)
+      return -1;
+    ret = devsw[f->major].write(1, addr, n);
+  } else if(f->type == FD_INODE){
+    // write a few blocks at a time to avoid exceeding
+    // the maximum log transaction size, including
+    // i-node, indirect block, allocation blocks,
+    // and 2 blocks of slop for non-aligned writes.
+    // this really belongs lower down, since writei()
+    // might be writing a device like the console.
+    int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+    int i = 0;
+    while(i < n){
+      int n1 = n - i;
+      if(n1 > max)
+        n1 = max;
+
+      begin_op();
+      ilock(f->ip);
+      if ((r = writei(f->ip, 1, addr + i, off, n1)) > 0)
+        off += r;
+      iunlock(f->ip);
+      end_op();
+
+      if(r != n1){
+        // error from writei
+        break;
+      }
+      i += r;
+    }
+    // ret = (i == n ? n : -1);
+  } else {
+    panic("mmap_filewrite");
+  }
+
+  return ret;
+}
+
+uint64
+sys_mmap(void)
+{
+  struct file *f;
+  int length, prot, flags, fd;
+  if(argint(1, &length) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0)
+    return -1;
+
+  if(!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return -1;
+
+  struct proc *p = myproc();
+  struct vma *pvma = p->pvma;
+  for(int i = 0; i < MAXVMA; i++) {
+    if(pvma[i].valid == 0) {
+      pvma[i].valid = 1;
+      pvma[i].valid_len = pvma[i].length = PGROUNDUP(length);
+      pvma[i].addr = p->sz;
+      pvma[i].prot = prot;
+      pvma[i].flags = flags;
+      pvma[i].offset = 0;
+      pvma[i].f = filedup(f);
+      p->sz += pvma[i].length;
+      return pvma[i].addr;
+    }
+  }
+
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+  struct vma *pvma = p->pvma;
+  int close = 0;
+
+  // find the corresponding vma
+  for(int i = 0; i < MAXVMA; i++) {
+    if(pvma[i].valid && addr >= pvma[i].addr + pvma[i].offset 
+          && addr < pvma[i].addr + pvma[i].offset + pvma[i].length) {
+      addr = PGROUNDDOWN(addr);
+      if(addr == pvma[i].addr + pvma[i].offset) {
+        // starting at begin of the valid address of vma
+        if(length >= pvma[i].valid_len) {
+          // whole vma is unmmaped
+          pvma[i].valid = 0;
+          length = pvma[i].valid_len;
+          close = 1;
+          p->sz -= pvma[i].length;
+        } else {
+          pvma[i].offset += length;
+          pvma[i].valid_len -= length;
+        }
+      } else {  // starting at middle, should unmap until the end
+
+        // lab requirement: An munmap call might cover 
+        // only a portion of an mmap-ed region, but you 
+        // can assume that it will either unmap at the 
+        // start, or at the end, or the whole region 
+        // (but not punch a hole in the middle of a region).
+        length = pvma[i].addr + pvma[i].offset + pvma[i].valid_len - addr;
+        pvma[i].valid_len -= length;
+      }
+
+      if(pvma[i].flags & MAP_SHARED) {
+        // write the page back to the file
+        if(mmap_filewrite(pvma[i].f, addr, length, addr - pvma[i].addr) == -1)
+          return -1;
+      }
+
+      uvmunmap(p->pagetable, addr, PGROUNDUP(length) / PGSIZE, 0);
+      if(close) fileclose(pvma[i].f);
+      return 0;
+    }
+  }
+
+  return -1;
+}

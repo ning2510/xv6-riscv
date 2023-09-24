@@ -29,7 +29,9 @@ int nblocks;  // Number of data blocks
 int fsfd;
 struct superblock sb;
 char zeroes[BSIZE];
+// IBLOCK(freeinode, sb) is inode block
 uint freeinode = 1;
+// data block
 uint freeblock;
 
 
@@ -128,6 +130,7 @@ main(int argc, char *argv[])
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
 
+  // argv[i]: _cat, _echo ...
   for(i = 2; i < argc; i++){
     // get rid of "user/"
     char *shortname;
@@ -155,6 +158,10 @@ main(int argc, char *argv[])
     bzero(&de, sizeof(de));
     de.inum = xshort(inum);
     strncpy(de.name, shortname, DIRSIZ);
+    // inode type 为 T_DIR 的，则 inode 存储的都是 struct dirent 变量
+    // 一个 struct dirent 代表一个文件，记录了文件的 inum 和 name
+    // 通过 inum 可以找到文件真正的内容:
+    // ((struct dinode *)(bread(inode->dev, IBLOCK(inode->inum, sb))))->addrs
     iappend(rootino, &de, sizeof(de));
 
     while((cc = read(fd, buf, sizeof(buf))) > 0)
@@ -278,6 +285,8 @@ iappend(uint inum, void *xp, int n)
     assert(fbn < MAXFILE);
     if(fbn < NDIRECT){
       if(xint(din.addrs[fbn]) == 0){
+        // 找到空闲的 data block num
+        // 之后会在 kernel/fs.c bmap() 中根据 off 查找对应的 data block num
         din.addrs[fbn] = xint(freeblock++);
       }
       x = xint(din.addrs[fbn]);

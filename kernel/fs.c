@@ -517,6 +517,7 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
       tot = -1;
       break;
     }
+    // printf("%d %d %s\n", off, off / BSIZE, ((struct dirent *)dst)->name);
     brelse(bp);
   }
   return tot;

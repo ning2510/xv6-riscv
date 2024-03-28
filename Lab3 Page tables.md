@@ -7,11 +7,11 @@
 
 ### 1. Paging Hardware
 
-`xv6` 运行于 `Sv39 RISC-V`，即在 64 位地址中只有最下面的39位被使用作为虚拟地址，其中底 12 位是页内偏移，高 27 位是页表索引，即 4096 字节 (212212) 作为一个 `page`，一个进程的虚拟内存可以有 227227 个 `page`，对应到页表中就是 227227 个 `page table entry` (PTE)。每个 `PTE` 有一个 44 位的 `physical page number` (PPN) 用来映射到物理地址上和 10 位 `flag`，总共需要 54 位，也就是一个 `PTE` 需要 8 字节存储。即每个物理地址的高 44 位是页表中存储的PPN，低 12 位是页内偏移，一个物理地址总共由 56 位构成。
+`xv6` 运行于 `Sv39 RISC-V`，即在 64 位地址中只有最下面的39位被使用作为虚拟地址，其中底 12 位是页内偏移，高 27 位是页表索引，即一个 `page` 由 $2^{12}$ (4096 字节) 个页表项组成，一个进程的虚拟内存可以有 $2^{27}$ 个 `page`，对应到页表中就是 $2^{27}$ 个 `page table entry` (PTE)。每个 `PTE` 有一个 44 位的 `physical page number` (PPN) 用来映射到物理地址上和 10 位 `flag`，总共需要 54 位，也就是一个 `PTE` 需要 8 字节存储。即每个物理地址的高 44 位是页表中存储的PPN，低 12 位是页内偏移，一个物理地址总共由 56 位构成。
 
 <img src="./images/50.png" style="zoom:60%;" />
 
-在实际中，页表并不是作为一个包含了 227227 个 `PTE` 的大列表存储在物理内存中的，而是采用了三级树状的形式进行存储，这样可以让页表分散存储。每个页表就是一页。第一级页表是一个 4096 字节的页，包含了 512 个 `PTE`（因为每个 `PTE` 需要 8 字节），每个 `PTE` 存储了下级页表的页物理地址，第二级列表由 512 个页构成，第三级列表由 512*512 个页构成。因为每个进程虚拟地址的高 27 位用来确定 `PTE`，对应到 3 级页表就是最高的 9 位确定一级页表 `PTE` 的位置，中间 9 位确定二级页表 `PTE` 的位置，最低 9 位确定三级页表 `PTE` 的位置。如下图所示。第一级根页表的物理页地址存储在 `satp` 寄存器中，每个 `CPU` 拥有自己独立的 `satp`
+在实际中，页表并不是作为一个包含了 $2^{27}$ 个 `PTE` 的大列表存储在物理内存中的，而是采用了三级树状的形式进行存储，这样可以让页表分散存储。每个页表就是一页。第一级页表是一个 4096 字节的页，包含了 512 个 `PTE`（因为每个 `PTE` 需要 8 字节），每个 `PTE` 存储了下级页表的页物理地址，第二级列表由 512 个页构成，第三级列表由 512*512 个页构成。因为每个进程虚拟地址的高 27 位用来确定 `PTE`，对应到 3 级页表就是最高的 9 位确定一级页表 `PTE` 的位置，中间 9 位确定二级页表 `PTE` 的位置，最低 9 位确定三级页表 `PTE` 的位置。如下图所示。第一级根页表的物理页地址存储在 `satp` 寄存器中，每个 `CPU` 拥有自己独立的 `satp`
 
 <img src="./images/14.png" style="zoom:60%;" />
 
@@ -87,9 +87,159 @@
 
 实际的处理器并不一定以 `4096 bytes` 为一页，而可能使用各种不同大小的页
 
-### 8. Lab1: Print a page table
+### 8. 页表的具体细节 (重要)
 
-#### 8.1 虚拟地址结构
+> 前提：理解了 `walk()`、`uvminit()`、`mappages()`
+
+首先来看一下第一个进程的页表是如何创建的
+
+```shell
+kernel/main.c: main()
+|
+v
+kernel/proc.c: userinit()
+|
+v
+kernel/proc.c: allocproc()
+|
+v
+kernel/proc.c: proc_pagetable()
+|
+v
+kernel/vm.c: uvmcreate()
+```
+
+页表就是通过 `uvmcreate()` 创建的：
+
+```c++
+pagetable_t
+uvmcreate()
+{
+  pagetable_t pagetable;
+  pagetable = (pagetable_t) kalloc();
+  if(pagetable == 0)
+    return 0;
+  memset(pagetable, 0, PGSIZE);
+  return pagetable;
+}
+```
+
+之后在 `proc_pagetable()` 中对页表进行了映射：
+
+```c++
+if(mappages(pagetable, TRAMPOLINE, PGSIZE,
+            (uint64)trampoline, PTE_R | PTE_X) < 0){
+    uvmfree(pagetable, 0);
+    return 0;
+}
+
+// map the trapframe just below TRAMPOLINE, for trampoline.S.
+if(mappages(pagetable, TRAPFRAME, PGSIZE,
+            (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+}
+```
+
+**先把这两个地方的映射忽略，因为和我们之后的分析无关**
+
+然后看 `userinit` 中的 `uvminit(p->pagetable, initcode, sizeof(initcode));`
+
+这一段话非常关键
+
+```c++
+void
+uvminit(pagetable_t pagetable, uchar *src, uint sz)
+{
+  char *mem;
+
+  if(sz >= PGSIZE)
+    panic("inituvm: more than a page");
+  mem = kalloc();
+  memset(mem, 0, PGSIZE);
+  // 这里进行了映射
+  // 虚拟地址: 0 ---> 物理地址: mem
+  // 虚拟地址: PGSIZE - 1 ---> 物理地址: mem + PGSIZE - 1
+  // 长度一共为 PGSIZE，即 4096 字节
+  // 为什么是 4096？因为一个页表有512个PTE，每个PTE占8字节，共4096字节
+  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
+  memmove(mem, src, sz);
+}
+```
+
+`uvminit` 中也进行了映射，是对虚拟地址 0 映射的。通过此次映射，页表中包含了什么？看下图
+
+<img src="./images/72.png" style="zoom:80%;" />
+
+**这个图非常重要！！！**
+
+- **红色部分是页表中已经映射到物理地址的**
+- **绿色和橙色部分是没有映射到虚拟地址的，但是有对应的物理地址 (意思是可以正常访问，但是值都是 0)**
+
+- **蓝色部分目前还没有向内存申请，也就是不存在的**
+
+接下来有意思的来了，我们输出做一下实验，看上面说的是否正确。在 `uvminit(..)` 下面添加一段代码：
+
+```c++
+pte_t *pte;
+int cnt = 0;
+for(int i = 0; i < 1024 * 1024 * 1024; i += PGSIZE) {
+    if((pte = walk(pagetable, i, 0)) == 0) {
+        printf("aaa %p %p\n", p->sz, i);
+        // continue;
+        panic("uvmcopy: pte should exist");
+    }
+    printf("%p %p %p %p %d\n", i, pte, *pte, PTE2PA(*pte), ++cnt);
+    if((*pte & PTE_V) == 0)
+    {
+        // printf("bbb %p %p\n", p->sz, i);
+        // continue;
+        // panic("uvmcopy: page not present");
+    }
+}
+```
+
+然后运行 `xv6`：`make qemu`，会看到如下输出：
+
+```shell
+...
+xv6 kernel is booting
+
+0x0000000000000000 0x0000000087f70000 0x0000000021fdc81f 0x0000000087f72000 1
+0x0000000000001000 0x0000000087f70008 0x0000000000000000 0x0000000000000000 2
+0x0000000000002000 0x0000000087f70010 0x0000000000000000 0x0000000000000000 3
+0x0000000000003000 0x0000000087f70018 0x0000000000000000 0x0000000000000000 4
+0x0000000000004000 0x0000000087f70020 0x0000000000000000 0x0000000000000000 5
+...
+0x00000000001fb000 0x0000000087f70fd8 0x0000000000000000 0x0000000000000000 508
+0x00000000001fc000 0x0000000087f70fe0 0x0000000000000000 0x0000000000000000 509
+0x00000000001fd000 0x0000000087f70fe8 0x0000000000000000 0x0000000000000000 510
+0x00000000001fe000 0x0000000087f70ff0 0x0000000000000000 0x0000000000000000 511
+0x00000000001ff000 0x0000000087f70ff8 0x0000000000000000 0x0000000000000000 512
+aaa 0x0000000000000000 0x0000000000200000
+```
+
+我们需要仔细分析一下输出内容：
+
+- 首先可以看出一共输出了 512 行，也就是说一共访问到了 512 个物理地址。这 512 其实就是 **第三级页表中一共有 512 个 `PTE`**，**就是上图右下角红色和橙色的部分**
+- **然后看第一列输出的值。**从 `0x0000000000000000 ~ 0x00000000001ff000`，以虚拟地址 `0x00000000001ff000` 为例进行拆分：
+  - `L2` 是 `0 0000 0000`，即 0
+  - `L1` 是 `0 0000 0000`，即 0
+  - `L0` 是 `1 1111 1111` ，即 511
+  - `Offset` 是 `0000 0000 0000`，即 0
+  - 再次验证是因为 **第三级页表中有 512 个`PTE`**
+
+- **然后看第二列输出的值。**假设第三级页表为 `pagetable3`，每个页表大小是 4096 字节，类型是 `uint64 *`，就相当于一个 `uint64` 的数组，因为是 `uint64`，所以每个变量 8 字节，数组长度为 4096 / 8 = 512。第二列的输出就是 `&pagetable3[i]`，即数组中每个元素的地址。
+- **然后看第三列输出的值。**可以看出来全部都是 0，这是因为还没有映射到对应的物理地址，即这部分页表还没有被 `xv6` 使用。但是可以看到第一行是有数据的，即 `0x0000000021fdc81f`，因为刚才在 `uvminit` 中映射了一个 `PTE`，即 **上图右下角红色部分**
+
+- **最后看第四列输出的值。**理解了第三列，这个就很好理解了。因为只映射了一个 `PTE`，并且这个 `PTE` 在第三级页表的下标是 0 (虚拟地址 `0x0000000000000000` 对应的 `L0` 是 0)，所以只有第一行有输出；而其他的都为 0，因为并没有对它们进行映射物理地址 (即没有进行 `mappages`)
+
+分析完毕，理解了上面的内容，则可以更好的理解页表结构
+
+### 9. Lab1: Print a page table
+
+#### 9.1 虚拟地址结构
 
 在 `xv6` 中物理地址的范围是 `0 ~ 2^56 - 1`，也就是说在 64 位的操作系统上只需要使用 56 位就足够对 `xv6` 进行寻址了，对于一个 64 位的物理地址来说，其组成分为
 
@@ -109,7 +259,7 @@
     <img src="./images/53.png" style="zoom:70%; float:middle;"/>
 </div>
 
-#### 8.2 虚拟地址寻址物理地址
+#### 9.2 虚拟地址寻址物理地址
 
 - 假如现在有一个虚拟地址 `va`，我们就可以拿到 `page addr2` (`9 bits`)，而 `9 bits` 的寻址范围正好是 `0 ~ 511`，可以把 `Page Directory` 虚表看作成一个 **数组**，那么 `page addr2` 就可以看作为数组的 **下标**，根据 `page addr2` 就可以在 `Page Directory` 对应的值 `pte`  (一个 8 `bytes` 的数)
 
@@ -147,7 +297,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
 }
 ```
 
-#### 8.3 代码实现
+#### 9.3 代码实现
 
 - 首先在 `kernel/exec.c` 末尾处添加
 
@@ -190,7 +340,7 @@ return argc;
 + }
 ```
 
-#### 8.4 实验结果
+#### 9.4 实验结果
 
 ```diff
 xv6 kernel is booting
@@ -211,13 +361,13 @@ init: starting sh
 $ 
 ```
 
-### 9. Lab2: A kernel page table per process
+### 10. Lab2: A kernel page table per process
 
-> `xv6` 有一个内核页表，每当它在内核中执行时就会使用该页表。 内核页表是到物理地址的直接映射，这样内核虚拟地址 `x` 就映射到物理地址 `x`。**` xv6` 还为每个进程的用户地址空间提供一个单独的页表 (`struct proc` 中 `pagetable` 字段)，仅包含该进程的用户内存的映射，从虚拟地址零开始。 由于内核页表不包含这些映射，因此用户地址在内核中无效。** 因此，当内核需要使用系统调用中传递的用户指针（例如传递给 `write()` 的缓冲区指针）时，内核必须首先将指针转换为物理地址。 本节和下一节的目标是允许内核直接取消引用用户指针。
+> **`xv6` 有一个内核页表（`vm.c:14` 的 `kernel_pagetable` 字段）**，每当它在内核中执行时就会使用该页表。 内核页表是到物理地址的直接映射，这样内核虚拟地址 `x` 就映射到物理地址 `x`。**` xv6` 还为每个进程的用户地址空间提供一个单独的页表 (`struct proc` 中 `pagetable` 字段)，仅包含该进程的用户内存的映射，从虚拟地址零开始。 由于内核页表不包含这些映射，因此用户地址在内核中无效。** 因此，当内核需要使用系统调用中传递的用户指针（例如传递给 `write()` 的缓冲区指针）时，内核必须首先将指针转换为物理地址。 本节和下一节的目标是允许内核直接取消引用用户指针。
 
 要理解这里的 “为什么无效” 就需要查看一下 **内核页表的映射** 和 **用户进程页表的映射**
 
-#### 9.1 内核页表
+#### 10.1 内核页表
 
 <img src="./images/7.png" style="zoom:40%;" />
 
@@ -226,7 +376,7 @@ $
 ```c++
 pagetable_t kernel_pagetable;		// 内核页表
 
-voidkvminit() {
+void kvminit() {
   kernel_pagetable = (pagetable_t)kalloc();
   memset(kernel_pagetable, 0, PGSIZE);
 
@@ -279,7 +429,7 @@ void procinit(void) {
 
 这里是为每个线程都映射了一个 `kernel stack`，当线程陷入内核态后会使用 **内核页表** 和 **`kernel stack` 内核栈**
 
-#### 9.2 用户进程页表
+#### 10.2 用户进程页表
 
 <img src="./images/8.png" style="zoom:40%;" />
 
@@ -311,19 +461,19 @@ pagetable_t proc_pagetable(struct proc *p) {
 
 可以看到用户进程页表只映射了 `TRAMPOLINE` 和 `TRAPFRAME` 两个地方
 
-#### 9.3 进程内核页表
+#### 10.3 进程内核页表
 
-> `xv6` 有一个内核页表，每当它在内核中执行时就会使用该页表。 内核页表是到物理地址的直接映射，这样内核虚拟地址 `x` 就映射到物理地址 `x`。**` xv6` 还为每个进程的用户地址空间提供一个单独的页表 (`struct proc` 中 `pagetable` 字段)，仅包含该进程的用户内存的映射，从虚拟地址零开始。 由于内核页表不包含这些映射，因此用户地址在内核中无效。** 因此，当内核需要使用系统调用中传递的用户指针（例如传递给 `write()` 的缓冲区指针）时，内核必须首先将指针转换为物理地址。 本节和下一节的目标是允许内核直接取消引用用户指针。
+> **`xv6` 有一个内核页表（`vm.c:14` 的 `kernel_pagetable` 字段）**，每当它在内核中执行时就会使用该页表。 内核页表是到物理地址的直接映射，这样内核虚拟地址 `x` 就映射到物理地址 `x`。**` xv6` 还为每个进程的用户地址空间提供一个单独的页表 (`struct proc` 中 `pagetable` 字段)，仅包含该进程的用户内存的映射，从虚拟地址零开始。 由于内核页表不包含这些映射，因此用户地址在内核中无效。** 因此，当内核需要使用系统调用中传递的用户指针（例如传递给 `write()` 的缓冲区指针）时，内核必须首先将指针转换为物理地址。 本节和下一节的目标是允许内核直接取消引用用户指针。
 
 通过查看 **内核页表** 和 **用户进程页表** 的结构后，就可以很容易理解上面的话要表达的意思：
 
 - **用户进程页表** 记录了进程在 **用户态** 时的相关信息，当进程从用户态切换到内核态时，会重新设置 `satp` 寄存器指向 **内核页表**。此时我们是拿不到进程在用户态的相关的信息的
 
-这就是问题所在，所以为了在内核态拿到用户态的信息，就需要在 `struct proc` 结构体中再添加一个字段 `kernelpgt` 用于表示每个进程的内核态页表（**也就是当进程陷入到内核态时会使用 `kernelpgt` 而不是之前的内核页表**）
+这就是问题所在，所以为了在内核态拿到用户态的信息，就需要在 `struct proc` 结构体中再添加一个字段 `kernelpgt` 用于表示每个进程的内核态页表（**也就是当进程陷入到内核态时会使用 `kernelpgt` 而不是之前的内核页表 `kernel_pagetable`**）
 
-所以我们的任务就是使用 **`kernelpgt`** 去替代之前的 **内核页表**，所以 `kernelpgt` 就需要有 **内核页表** 之前映射的地方；之前只有一个内核页表，并且内核页表中映射了所有进程的 **kernel stack**，但现在每个进程都有属于自己的 **kernelpgt**，所以只需要把每个进程的 **kernel stack** 在属于该进程的 **kernelpgt** 上映射就可以了
+所以我们的任务就是使用 **`kernelpgt`** 去替代之前的 **内核页表 `kernel_pagetable`**，所以 `kernelpgt` 就需要有 **内核页表 `kernel_pagetable`** 之前映射的地方；之前只有一个内核页表，并且内核页表中映射了所有进程的 **kernel stack**，但现在每个进程都有属于自己的 **kernelpgt**，所以只需要把每个进程的 **kernel stack** 在属于该进程的 **kernelpgt** 上映射就可以了
 
-#### 9.4 代码实现
+#### 10.4 代码实现
 
 在 `kernel/defs.h` 添加函数声明
 
@@ -503,18 +653,21 @@ kvmpa(uint64 va)
 }
 ```
 
-### 10. Lab3: Simplify copyin/copyinstr
+### 11. Lab3: Simplify copyin/copyinstr
 
-#### 10.1 实验要求
+#### 11.1 实验要求
 
-将每个进程的 `suer page table` 复制到进程的 `kernel page table (kernelpgt)` 上，从而让每个进程在 `copyin` (此时进程处于内核态) 的时候不需要再利用 `process user page table` (用户态页表) 来翻译传入的参数指针 (这里指的是虚拟地址)，而可以直接通过 `process kernel page table` 访问虚拟地址对于的物理内存
+将每个进程的 `user page table` 复制到进程的 `kernel page table (kernelpgt)` 上，从而让每个进程在 `copyin` (此时进程处于内核态) 的时候不需要再利用 `process user page table` (用户态页表) 来翻译传入的参数指针 (这里指的是虚拟地址)，而可以直接通过 `process kernel page table` 访问虚拟地址对于的物理内存
 
 > 这里重点解释一下：
 >
 > - `copyin` 是处于内核态才会调用的，而 `process user page table` 是用户态的页表，内核态想要访问用户态的信息就需要先拿到 **虚拟地址** 和 **`process user page table`**，然后通过 `process user page table` 翻译虚拟地址才能访问到实际的物理内存。在这个过程中 **`process user page table`** 是必不可少的
 > - 现在要做的就是摆脱对 `process user page table` 的依赖，我们要做的就是当 `process user page table` 发生改变的时候，及时的把 `process user page table` 复制到 `kernel page table (kernelpgt)` 中，由于进程陷入内核态时页表是 `kernelpgt`，这样我们就可以直接用 **虚拟地址** 访问 `kernelpgt` 来拿到用户态的信息了
+> - 解释一下 `int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)` 这个函数
+>   - 从虚拟地址 `srcva` 拷贝 `len bytes` 到 `dst` 
+>   - `pagetable` 是用户态的页表，通过该页表将 `srcva` 进行翻译
 
-#### 10.2 代码实现
+#### 11.2 代码实现
 
 先写一个将 `process user page table` 复制到 `kernelpgt` 的函数 `u2kvmcopy`，注意在复制的过程中需要先清除原先 `PTE` 中的 `PTE_U` 标志位，否则 `kernel` 无法访问
 
@@ -558,7 +711,14 @@ pte_t*          walk(pagetable_t pagetable, uint64 va, int alloc);
 + int             copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max);
 ```
 
-修改 `copyin` 和 `copyinstr`
+修改 `copyin` 和 `copyinstr`，在其内部分别用 `copyin_new` 和 `copyinstr_new` 替代
+
+说一下 `copyin` 、 `copyinstr` 与 `copyin_new` 、 `copyinstr_new` 的区别，以 `copyin` 和 `copyin_new` 为例：
+
+- `int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)` 
+- 在 `copyin` 中需要通过 `pagetable` 把虚拟地址 `srcva` 翻译成物理地址 `pa` 后在将 `pa` 处的内容复制 `len bytes` 到 `dst` 中。这是因为 `pagetable` 是内存态的页表，而 `copyin` 只会被内核态调用，所以内核态的页表是不能直接将 `srcva` 翻译成物理地址的，需要通过内核态的页表 `pagetable` 才可以
+- **通过 `u2kvmcopy` 后我们将用户态的页表复制了一份到内核态，意思就是对于一个虚拟地址 `va` 来说，在用户态页表对应的物理地址是 `user_pa`，在内核态的物理地址是 `kernel_va`，而 `u2kvmcopy` 的目的就是将 `user_pa` 处的内容复制到 `kernel_va`。这样无论是在用户态还是内核态，通过虚拟地址 `va` 访问到的物理地址不同，但是内容是相同的**
+- 再说 `copyin_new`，其实就是直接将虚拟地址 `srcva` 处的内容复制 `len bytes` 到 `dst`。这个过程并没有通过 `pagetable` 翻译，因为内核态页表已经知道 `va` 对应的物理地址（`u2kvmcopy` 的功劳）
 
 ```diff
 int
@@ -625,80 +785,3 @@ for(argc = 0; argv[argc]; argc++) {
 + u2kvmcopy(p->pagetable, p->kernelpgt, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

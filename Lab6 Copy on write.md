@@ -231,4 +231,3 @@ int             copyinstr(pagetable_t, char *, uint64, uint64);
 + pte_t*          walk(pagetable_t pagetable, uint64 va, int alloc);
 ```
 
-

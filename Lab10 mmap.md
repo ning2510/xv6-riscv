@@ -139,6 +139,27 @@ int munmap(void *addr, int length);
 + entry("munmap");
 ```
 
+修改 `kernel/fcntl.h`
+
+```diff
+- #ifdef LAB_MMAP
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
+
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+- #endif
+```
+
+在 `kernel/param.h` 中添加
+
+```diff
+#define MAXPATH      128   // maximum file path name
++ #define MAXVMA       16
+```
+
 在 `kernel/proc.h` 中添加对 `vma` 结构体的定义，每个进程中最多可以有 16 个 `VMA`
 
 ```diff
@@ -193,7 +214,7 @@ sys_mmap(void)
 }
 ```
 
-在 `kernel/trap.c` 中添加lazy allocation
+在 `kernel/trap.c` 中添加 `lazy allocation`
 
 ```diff
 + } else if(r_scause() == 13 || r_scause() == 15) {
@@ -229,7 +250,7 @@ sys_mmap(void)
 + bad:
 ```
 
-需要判断 `page fault` 的地址是合理的，如果 `fault` 的地址低于了当前进程的栈底 (`p->trapframe->sp`) 或者高于等于当前进程的堆顶 (`p->sz`) 就说明是不合理的，需要进入 `bad`。然后判断当前 `fault` 的地址是在哪一个 `VMA` 的合法范围中，找到这个 `VMA` 后分配一页物理页，并用 `mappages` 将这一页物理页映射到 `fault` 的用户内存中，然后用 `readi` 打开需要映射的文件，将对应的文件内容用 `readi` 放入这一页内存中去
+需要判断 `page fault` 的地址是合理的，如果 `fault` 的地址低于了 **当前进程的栈底 (`p->trapframe->sp`) 或者高于等于当前进程的堆顶 (`p->sz`)** 就说明是不合理的，需要进入 `bad`。然后判断当前 `fault` 的地址是在哪一个 `VMA` 的合法范围中，找到这个 `VMA` 后分配一页物理页，并用 `mappages` 将这一页物理页映射到 `fault` 的用户内存中，然后用 `readi` 打开需要映射的文件，将对应的文件内容用 `readi` 放入这一页内存中去
 
 在 `kernel/sysfile.c` 实现 `munmap`
 
@@ -350,21 +371,61 @@ mmap_filewrite(struct file *f, uint64 addr, int n, uint off)
 `uvmcopy()`
 
 ```diff
+    if((pte = walk(old, i, 0)) == 0)
++      continue;
++      // panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      continue;
-+     // panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
++      continue;
++      // panic("uvmcopy: page not present");
 ```
 
 `uvmunmap()`
 
 ```diff
+    if((pte = walk(pagetable, a, 0)) == 0)
++      continue;
++      // panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      continue;
-+     // panic("uvmunmap: not mapped");
++      continue;
++      // panic("uvmunmap: not mapped");
 ```
 
+修改 `kernel/proc.c`，使得在 `fork()` 时将父进程的 `pvma` 复制给子进程
 
+```diff
+    release(&np->lock);
+    return -1;
+  }
++
++  for(int i = 0; i < MAXVMA; i++) {
++    struct vma *pvma = &p->pvma[i];
++    struct vma *cvma = &np->pvma[i];
++    if(pvma->valid) {
++      memmove(cvma, pvma, sizeof(struct vma));
++      filedup(cvma->f);
++    }
++  }
++
+  np->sz = p->sz;
+```
+
+同时修改 `kernel/proc.c` 中 `exit()` 退出时删除 `vma`
+
+```diff
+  }
+
++  struct vma *pvma = p->pvma;
++  for(int i = 0; i < MAXVMA; i++) {
++    if(pvma->valid) {
++      uvmunmap(p->pagetable, pvma[i].addr, pvma[i].length / PGSIZE, 0);
++      memset(&pvma[i], 0, sizeof(struct vma));
++    }
++  }
+
+  begin_op();
+  iput(p->cwd);
+  end_op();
+```
 
 
 

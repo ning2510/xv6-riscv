@@ -53,7 +53,7 @@
 - **`block 2-31`：** `log block`
 - **`block 32-44`：** `inode`，一个 `inode` 的大小为 64 字节，一个 `block` 的大小为 1024 字节，因此 `block32` 为 `inode 1-16`，`block33` 为 `inode 17-32`
 - **`block 45`：**`bitmap block`，用来跟踪哪些 `block` 是在使用
-- 最后从 `block 46` 开始是 `data block`，要么是在 `bitmap` 中被标记为空闲状态，要么存储了文件/文件夹的内容
+- 最后从 `block 70` 开始是 `data block`，要么是在 `bitmap` 中被标记为空闲状态，要么存储了文件/文件夹的内容
 
 ### 2. Buffer cache layer
 
@@ -1813,7 +1813,7 @@ static struct inode *iget(uint dev, uint inum);
   iget (dev=1, inum=3) at kernel/fs.c:263
   263       acquire(&icache.lock);
   
-  # finish 下面的可以不看，我们是回到 
+  # finish 下面的可以不看 
   (gdb) finish
   Run till exit from #0  iget (dev=1, inum=3) at kernel/fs.c:263
   0x0000000080003cc8 in dirlookup (dp=dp@entry=0x8001abd8 <icache+24>, name=name@entry=0x3fffff9e60 "cat", poff=poff@entry=0x0) at kernel/fs.c:648
@@ -1894,7 +1894,7 @@ static struct inode *iget(uint dev, uint inum);
 
     - 在 `struct proc` 中有一个 `struct file *ofile[16]`，它代表的就是每个进程最多可以创建 16 个文件描述符，并且每个进程的描述符都是 0 ~ 15
 
-  - `filealloc()` 就是在 `ftable` 找到一个空闲的 `struct file`
+  - `filealloc()` 就是在 `ftable` 找到一个空闲的 `struct file`，**所有进程共同使用 `ftable` 中的 `struct file`，`ftable` 中只有 100 个 `struct file`**
 
   - `fdalloc()` 就是把 `filealloc()` 返回的那个空闲的 `struct file` 添加到 `p->ofile` 中
 
@@ -1996,6 +1996,242 @@ static struct inode *iget(uint dev, uint inum);
 
   > `write` 的相应流程就是之前 `lab` 的内容，就不过多解释
 
+#### 9.5 inodes block 的存储结构
+
+![](./images/68.png)
+
+这里仔细讲一下：
+
+-  `mkfs` 创建系统镜像时用到了哪些类型的 `block`
+-  `inodes` 与 `data` 的对应关系
+
+首先，**`mkfs` 创建系统镜像时用到了哪些类型的 `block`：**
+
+- `super block`
+- `inodes`
+- `bit map`
+- `data`
+
+
+
+**其次，重点讲一下 `inodes` 与 `data` 的对应关系（图右半部分）：**
+
+`inodes` 中存储的是 `struct dinode`，而 `struct dinode` 有两种类型：
+
+- `T_DIR` 目录，如图中右半部分的 `struct dinode1`
+- `T_FILE` 文件，如图中右半部分的 `struct dinode2`
+
+**对于 `T_DIR` 来说：**
+
+`dinode1.addrs` 中存储的是 `data block` 的编号（`data block` 的编号是 `70~20000`），而对应的 `data block` 中存储的内容都是 `struct dirent`，每个 `struct dirent` 是 16 字节，所以一个 `data block` 是 1024 字节，可以存储 `64` 个 `struct dirent`
+
+通过 `mkfs.c` 就可以发现，程序首先申请了一个 `inodes block`，并且在 `inodes block` 中申请了一个 `struct dinode`，用 `dinode1` 表示，并且 `dinode1.type` 为 `T_DIR`，这也是第一个 `struct dinode`，所以它的编号是 1，用 `rootino` 表示。之后将所有文件，例如 `_ls`、`_cat` 等文件包装成 `struct dirent` 放到了根目录中（`dinode.addrs` 指向的 `data block`）
+
+每当要存储一个文件到该目录时，首先申请一个 `struct dinode2`，编号为 `2`（因为 `dinode1` 的编号 是 1）。`dirent` 中就记录了 `dinode2` 的编号 2 和文件的名字 (如 `_ls`)
+
+然后把这个 `dirent` 写到 `dinode2.addr[i]` 中，首先从 `addrs[0]` 开始写，根据图中假设 `addrs[0]` 为 70，那么就会找到编号为 70 的 `data block`，然后把 `dirent` 追加到 `data block` 的末尾
+
+**对于 `T_FILE` 来说：**
+
+还是根据上面的思路继续说，`dinode2` 代表一个文件，已经被存储到了 `dinode1.addrs[0]` 中（`dinode1` 是一个目录，里面只存储文件的必要信息，不存储文件的真正内容）。那么之后就是要存储这个文件的真正内容了，其实就是存到了 `dinode2.addrs` 中了
+
+> `addrs[0~11]` 是直接映射，它们都分别指向了一个 `data block`，而这些 `data block` 里面就存储着文件的内容
+>
+> `addrs[12]` 是间接映射，`addrs[12]` 也指向了一个 `data block`（编号为 83），但是这个 `data block` 中存储了 256 个 `uint` 类型的变量，每个变量的值就是一个 `data block` 的编号，假设第一个 `uint` 类型的变量为 `84`，则编号为 `84` 的 `data block` 中存储着文件的真正内容。**所以看出来是双层映射**
+
+
+
+#### 9.6 block 在硬盘结构和内存结构的存储区别
+
+这节主要说一下 `inodes block` 和 `data block` 在 **硬盘上存储的结构** 以及在 **内存上存储的结构**
+
+![](images/68.png)
+
+首先是在 **硬盘上的结构：**
+
+- `inodes block` 的结构对应的是 `fs.h` 中的 `struct dinode`。`dinode` 是 64 字节，而一个 `inodes block` 是 1024 字节，也就是说每个 `inodes block` 中可以存储 1024/64=16 个 `struct dinode`
+
+- `data block` 有两种情况：
+  - 存储的是 **目录：**对应的是 `fs.h` 中的 `struct dirent`，`dirent` 是 16 字节，而一个 `data block` 是 1024 字节，也就是说每个 `data block` 中可以存储 1024/16=64 个 `struct dirent`
+  - 存储的是 **文件：**此种情况是直接将文件的内容存到 `data block` 中，若文件大于 1024 字节，则会存储到多个 `data block` 中
+
+其次是在 **内存上的结构：**
+
+<img src="./images/69.png" style="zoom:70%;" />
+
+- `inodes block` 在内存中对应的是 `file.h` 中的 `struct inode`。根据上图可以看出 `dinode` 和 `inode` 的区别，`xv6` 从硬盘上读取一个 `struct dinode` (读取 64 字节) 后，会再创建一个 `struct inode`，并且将 `dinode` 中的所有字段都记录到 `inode` 中，同时在 `inode` 中还记录了一些额外的信息供 `xv6` 使用。
+
+<img src="./images/70.png" style="zoom:60%;" />
+
+- `data block` 在内存中对应的是 `buf.h` 中的 `struct buf`。根据上图可以看出 `data block` 在硬盘上和内存上的区别，`xv6` 从一个 `data block` 中读取数据后会存储到 `struct buf` 的 `data` 字段，同时记录一些额外的信息供 `xv6` 使用。
+
+#### 9.7 log block 结构
+
+`xv6` 一共有 30 个 `log block`，每个 `log block` 大小是 1024 字节。第一个 `log block` (编号为 2 的 `block`) 中存储的是 `struct logheader`，后 29 个 `log block` 存储的是数据 (对应的是 `struct buf` 中的 `data` 字段)
+
+首先来看一下 `struct logheader` 和 `struct log`
+
+```c++
+#define LOGSIZE 3*10
+
+struct logheader {
+  int n;
+  int block[LOGSIZE];
+};
+
+struct log {
+  struct spinlock lock;
+  int start;
+  int size;
+  int outstanding; // how many FS sys calls are executing.
+  int committing;  // in commit(), please wait.
+  int dev;
+  struct logheader lh;
+};
+struct log log;
+```
+
+在未修改的情况下，`LOGSIZE` 为 30，即 `logheader` 可以存储 30 个 `blockno`。`block[i]` 代表的是 `block` 的编号，通过 `bread(log.dev, log.lh.block[i])` 可以拿到 `log.lh.block[i]` 对应的那块 `block`。
+
+![](./images/71.png)
+
+**接下来通过举一个例子来详细解释一下上图：**
+
+我们就按照 `xv6` 中使用 `log` 的典型流程的顺序说明
+
+```c++
+begin_op();
+...
+bp = bread();
+bp->data = ...;
+log_write(bp);
+...
+end_op();
+```
+
+首先通过 `bp = bread()` 拿到我们想要修改的那个 `block`，通过 `bp->data = ...` 将这块 `block` 修改后，我们需要通过 `log_write(bp)` 将修改后的 `block` 写入到 `log block` 中，但其实 `log_write(bp)` 只是将 `bp->blockno` 记录到了 `log.lh.block[i]` 中，详细看一下代码：
+
+```c++
+void
+log_write(struct buf *b)
+{
+  int i;
+
+  // 首先判断 log.lh.block 是否存满了
+  if (log.lh.n >= LOGSIZE || log.lh.n >= log.size - 1)
+    panic("too big a transaction");
+  if (log.outstanding < 1)
+    panic("log_write outside of trans");
+
+  acquire(&log.lock);
+  for (i = 0; i < log.lh.n; i++) {
+    // 如果 log.lh.block[i] == b->blockno，说明 b->blockno 这块 data block 之前已经修改了但是还没有 commit，所以这次修改和之前的可以合并为一次之后一起 commit
+    if (log.lh.block[i] == b->blockno)   // log absorbtion
+      break;
+  }
+  // 记录 b->blockno 到 log.lh.block[i]
+  log.lh.block[i] = b->blockno;
+  if (i == log.lh.n) {  // Add new block to log?
+    // pin 一下这块 data block，仿真 b.refcnt 为 0 后释放
+    // 因为此时 b 是这块 data block 修改后的唯一备份
+    bpin(b);
+    log.lh.n++;
+  }
+  release(&log.lock);
+}
+```
+
+之后会调用 `end_op()`，在 `endop()` 中我们只讲解最重要的 `commit()`，我们来看一下代码：
+
+```c++
+static void
+commit()
+{
+  if (log.lh.n > 0) {
+    write_log();     // Write modified blocks from cache to log
+    write_head();    // Write header to disk -- the real commit
+    install_trans(0); // Now install writes to home locations
+    log.lh.n = 0;
+    write_head();    // Erase the transaction from the log
+  }
+}
+```
+
+首先是 `write_log()`。`log.lh.n` 代表有多少个 `block` 发生了改变，`log.lh.block[i]` 记录是这些改变的 `block` 的 `id`。首先通过 `bread` 拿到了对应的 `block` 为 `from`，然后要将这个改变的 `block` 先存储到 `log block` 中，`to` 就是从 `log block` 中依次取出 (从第二个 `log block` 取出，第一个只存放 `logheader`) 一个 `block` 用于存放 `from`
+
+```c++
+static void
+write_log(void)
+{
+  int tail;
+
+  for (tail = 0; tail < log.lh.n; tail++) {
+    struct buf *to = bread(log.dev, log.start+tail+1); // log block
+    struct buf *from = bread(log.dev, log.lh.block[tail]); // cache block
+    memmove(to->data, from->data, BSIZE);
+    bwrite(to);  // write the log
+    brelse(from);
+    brelse(to);
+  }
+}
+```
+
+之后看 `write_head()`。`write_log()` 把改变的 `block` 写到了 `log block` 中 (第 2 个到 31 个的 `log block`)，之后就是要更新第一个 `log block`
+
+```c++
+static void
+write_head(void)
+{
+  struct buf *buf = bread(log.dev, log.start);
+  struct logheader *hb = (struct logheader *) (buf->data);
+  int i;
+  hb->n = log.lh.n;
+  for (i = 0; i < log.lh.n; i++) {
+    hb->block[i] = log.lh.block[i];
+  }
+  bwrite(buf);
+  brelse(buf);
+}
+```
+
+之后执行 `install_tans(0)`。可以看到将 `log block` 中存储的数据写到了真正修改的 `block` 中，这里只是对第二个及之后的 `log block` 进行操作，第一个 `log block` 只存储了 `logheader` 是不需要进行同步的
+
+所以可以知道总体的流程：
+
+- `bp = bread(dev, inum)` 拿到编号为 `inum` 的 `block`
+- `bp->data = ...` 修改这个 `block`
+- `log_write()`，将 `inum` 保存到 `log.lh.block[i]` 中
+- `commit()`，包括 `write_log()` 和 `write_head()`。将修改后的 `bp` 保存到 `log block` 中，然后同步 `logheader`
+- `install_trans(0)`，将保存在 `log block` 的 `bp` 同步到编号为 `inum` 的 `block`
+  - 相当于 `log block` 对修改的 `block` 做了缓存，并持久化到了磁盘中。如果这时断电，由于修改的数据保存到了磁盘中，当 `xv6` 再次启动时会调用 `initlog()`，从而调用 `recover_from_log()`，首先会读取之前存在磁盘上的 `log block`，此时会发现第一个 `log block` 的 `log.lh.n > 0`，就可以知道之前有修改的数据并没有真正同步，然后就会调用 `install_trans(1)` 进行同步
+
+```c++
+static void
+install_trans(int recovering)
+{
+  int tail;
+
+  for (tail = 0; tail < log.lh.n; tail++) {
+    struct buf *lbuf = bread(log.dev, log.start+tail+1); // read log block
+    struct buf *dbuf = bread(log.dev, log.lh.block[tail]); // read dst
+    memmove(dbuf->data, lbuf->data, BSIZE);  // copy block to dst
+    bwrite(dbuf);  // write dst to disk
+    if(recovering == 0)
+      bunpin(dbuf);
+    brelse(lbuf);
+    brelse(dbuf);
+  }
+}
+```
+
+之后执行 `log.lh.n = 0`。因为上一步已经把所有修改后的 `block` 进行了同步，所以需要更新 `logheader`
+
+最后再次调用 `write_head()` 以更新 `log.lh.n`
+
+至此，艺术已成！
+
+
+
 ### 10. Lab1: Large files
 
 #### 10.1 实验原理
@@ -2024,7 +2260,7 @@ static struct inode *iget(uint dev, uint inum);
 首先更改 `NDIRECT` 的定义，在 `kernel/fs.h` 中
 
 ```diff
-+ #define NDIRECT 12
++ #define NDIRECT 11
 #define NINDIRECT (BSIZE / sizeof(uint))
 + #define DBNINDIRECT NINDIRECT * NINDIRECT
 + #define MAXFILE (NDIRECT + NINDIRECT + DBNINDIRECT)

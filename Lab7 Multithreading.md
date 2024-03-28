@@ -161,7 +161,7 @@ struct cpu {
 };
 ```
 
-注意这个 `context`，每个 `struct cpu` 中都有 `context` 字段，其存储的是调度器进程的寄存器信息，当 `xv6` 通过 `scheduler()` 切换进程时，会将进程的 `context` 个字段复制给各寄存器，此时 `xv6` 会执行 `ret` 跳转到 `ra` 寄存器指向的地址继续执行程序
+注意这个 `context`，每个 `struct cpu` 中都有 `context` 字段，其存储的是调度器进程的寄存器信息，当 `xv6` 通过 `scheduler()` 切换进程时，会将进程的 `context` 个字段复制给各寄存器，此时 `xv6` 会 **执行 `ret` 跳转到 `ra` 寄存器指向的地址继续执行程序**
 
 **而当 `xv6` 通过 `sched()` 使当前进程让出 `CPU` 时，又会将 `struct cpu` 的 `context` 的值复制给各寄存器，然后执行 `ret` 会跳转到 `swtch(&c->context, &p->context)` ，给人的感觉就是调用 `swtch()` 返回了，之后继续执行下一条语句 `c->proc = 0`**，当 `c->proc` 为 0，代表此时是调度器进程在执行程序
 
@@ -343,7 +343,7 @@ sched(void)
 
 ### 7. 如何实现 fork (重要)
 
-有没有想过一个问题，问什么在 `xv6` 中 `pid = fork()` 后，`pid` 的值有两种：
+有没有想过一个问题，为什么在 `xv6` 中 `pid = fork()` 后，`pid` 的值有两种：
 
 ```c++
 int pid = fork();
@@ -386,11 +386,36 @@ if(pid == 0) {	// child process
   50:	84aa                mv	s1,a0
 ```
 
+```shell
+# 调试信息
+(gdb) file user/_init 
+Reading symbols from user/_init...
+(gdb) b 28
+Breakpoint 1 at 0x48: file user/init.c, line 28.
+(gdb) c
+Continuing.
+[Switching to Thread 1.3]
+
+Thread 3 hit Breakpoint 1, main () at user/init.c:28
+28          pid = fork();
+(gdb) p/x $ra
+$1 = 0x48
+(gdb) p/x $pc
+$2 = 0x48
+(gdb) s
+fork () at user/usys.S:5
+5        li a7, SYS_fork
+(gdb) p/x $ra			# 特别注意这里 ra 的值是 0x50，后面会使用到
+$3 = 0x50
+(gdb) p/x $pc
+$4 = 0x35c
+```
+
 > `auipc ra,0x0` 就是将 `PC` 寄存器加上 `0x0` 后赋值给 `ra` 寄存器
 >
 > `jalr 788(ra)` 就是跳转到 `ra + 788` 的地址上，这里 788 是十进制数
 >
-> `#35c <fork>` 是注释也就是跳转到 `fork` 方法，`ra + 788` 就是 `0x35c`，反推可以知道此时 `PC` 是 `0x4e`，没有问题
+> `#35c <fork>` 是注释也就是跳转到 `fork` 方法，`ra + 788` 就是 `0x35c`，反推可以知道此时 `ra` 是 `0x50`，`pc` 是 `0x35c`，没有问题
 
 调用 `fork()` 系统调用后进程会陷入内核态，进入 `usertrap()`，进而调用 `syscall()`，之后调用 `sys_fork()`，最后进入到 `kernel/proc.c` 的 `fork()` 方法
 
@@ -544,7 +569,7 @@ fork:
 
 > 这里其实就是在 `user/init.c:28` 的 `pid = fork();` 的汇编代码
 
-在 `userret` 最后会调用 `SRET`，此时程序就会跳转到 `0x362` 处继续执行程序，也就是执行了 `ret` 汇编指令，执行 `ret` 汇编指令后，程序就会跳转到 `ra` 指向的地址 (**相当于 `pid = fork()` 调用的 `fork()` 返回了**) 
+在 `userret` 最后会调用 `SRET`，此时程序就会跳转到 `0x362` 处继续执行程序，然后执行 `ret` 汇编指令，执行 `ret` 汇编指令后，程序就会跳转到 `ra` 指向的地址 (**相当于 `pid = fork()` 调用的 `fork()` 返回了**) 。**注意这里 `ra` 的地址（`0x50`）是 `fork` 进入内核态前在 `trampoline.S` 中的 `uservec` 保存的，前面有提到 `ra` 为什么是 `0x50`**
 
 而当 `fork()` 调用返回，会将 `a0` 寄存的值赋值给 `pid`，所以此时 `pid` 为 0 (上文说了子进程的 `a0` 寄存器 (`np->trapframe->a0`) 为 0，而父进程的 `a0` 寄存器 (`p->trapframe->a0`) 为子进程的进程号)
 

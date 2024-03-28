@@ -218,7 +218,7 @@ uservec:
 >     if((pte = walk(pagetable, a, 1)) == 0)
 >       return -1;
 >     ...
->     *pte = PA2PTE(pa) | perm | PTE_V;	// pte 指向的地址的前8个字节存储了物理地址
+>     *pte = PA2PTE(pa) | perm | PTE_V;
 >     ...
 >   }
 >   return 0;
@@ -273,7 +273,7 @@ uservec:
 
 `trap` 的执行流程中可以分为以下几类：
 
-- `ECALL `指令之前的状态
+- `ECALL ` 指令之前的状态
 - `ECALL` 指令之后的状态
 - `uservec` 函数
 - `usertrap` 函数
@@ -369,7 +369,7 @@ uservec:
 
 <img src="./images/8.png" style="zoom:40%;" />
 
-`user page table` 映射的相关代码在 `proc.c` 中的 `proc_pagetable()`。由于 `xv6` 启动时是出于 **内核态** 的，通过 `usertrapret()` 方法返回到 **用户态** 时会通过 `uint64 satp = MAKE_SATP(p->pagetable)` 获取 `user page table`，之后赋值给 `SATP` 寄存器
+`user page table` 映射的相关代码在 `proc.c` 中的 `proc_pagetable()`。由于 `xv6` 启动时是处于 **内核态** 的，通过 `usertrapret()` 方法返回到 **用户态** 时会通过 `uint64 satp = MAKE_SATP(p->pagetable)` 获取 `user page table`，之后赋值给 `SATP` 寄存器
 
 通过 `mappages(pagetable, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X)` 完成 **用户态** 的 `TRAMPOLINE` 映射
 
@@ -403,7 +403,7 @@ uservec:
 
   - **`SATP`**，指向的是 `kernel/user page table`
 
-    - **执行 `make CPUS=1 qume` 后，按 `CTRL a + x` 然后输入 `info mem` 可以查看当前 `page table` 的详细情况**
+    - **执行 `make CPUS=1 qume` 后，按 `CTRL a + c` 然后输入 `info mem` 可以查看当前 `page table` 的详细情况**
 
   - **`SEPC`**，在 `userinit()` 方法中被清 0（即指向 `0x0`，也就是 `initcode.asm` 中的 `la a0, init` 语句）
 
@@ -437,7 +437,7 @@ uservec:
 
   - **`SSCRATCH`**，`usertrapret()` 方法的最后调用了 `userret` 并传入了两个参数 `TRAPFRAME` 和 `stap`，两者的值分别为 `0x0000003fffffe000` 和 `0x8000000000087f75`。 
 
-    - `TRAPFRAME` 指向其实是 `proc.h` 中的 `struct trapframe` 结构体。同时 `TRAMPLINE 在 `user page table` 和 `kernel page table` 映射的位置（虚拟地址和物理地址都相同）是一样的。
+    - `TRAPFRAME` 指向其实是 `proc.h` 中的 `struct trapframe` 结构体。同时 `TRAMPLINE` 在 `user page table` 和 `kernel page table` 映射的位置（虚拟地址和物理地址都相同）是一样的。
     - 这里的 `satp` 是用户态的 `page table`（当前为内核态）
 
 <img src="./images/1.png" style="zoom:70%;" />
@@ -457,6 +457,156 @@ uservec:
   - **`write(fd, &c, 1)` 中 `fd、&c、1` 分别对应了 `a0、a1、a2` 寄存器（这里的 `fd` 为 2）**
 
 <img src="./images/4.png" style="zoom:70%;" />
+
+#### 6.5 SRET 返回时会跳转到哪个程序（重要）
+
+通过 **6.4** 可以知道 `xv6` 的第一个用户进程，通过 `allocproc()` 创建，当 `schuduler` 调度器调度到该进程时，会执行 `forkret()` 方法，其中会调用 `usertrapret`，之后会调用 `userret`，然后执行 `SRET` 指令，程序就会跳转到 `initcode.S / initcode.asm` 中
+
+**但是你是否想过是什么因素决定了程序会跳转到这里的？**
+
+- **`SEPC` 寄存器。**这是毋庸置疑的，当执行 `SRET` 时，`SEPC` 寄存器的值赋值给 `PC` 寄存器，然后程序跳转到 `PC` 指向的地址继续执行。
+  - 但通过打印 `PC` 寄存器的值可以发现是 `0X0`，那为什么偏偏跳转到了 `initcode.S` 中，而不是 `cat.asm` 或者是 `ls.asm`，其他的汇编文件中都是从 `0X0` 地址开始的？**答案是第二种因素决定的**
+- **`SATP` 寄存器。**其实就是看 `p->pagetable`，因为在 `usertrapret` 中执行了 `uint64 satp = MAKE_SATP(p->pagetable)`，然后在 `userret` 中将 `satp` 赋值给了 `SATP` 寄存器
+  - `SATP` 寄存器存储了页表的地址，当程序访问一个虚拟地址时，通过 `SATP` 寄存器找到对应的页表，然后通过页表将虚拟地址翻译成物理地址
+
+然后再看一下 `initcode.asm`
+
+```assembly
+user/initcode.o:     file format elf64-littleriscv
+
+Disassembly of section .text:
+
+0000000000000000 <start>:
+#include "syscall.h"
+
+# exec(init, argv)
+.globl start
+start:
+        la a0, init
+   0:	00000517          	auipc	a0,0x0
+   4:	00050513          	mv	a0,a0
+        la a1, argv
+   8:	00000597          	auipc	a1,0x0
+   c:	00058593          	mv	a1,a1
+        li a7, SYS_exec
+  10:	00700893          	li	a7,7
+        ecall
+  14:	00000073          	ecall
+```
+
+上面是部分代码，`0` 和 `4` 是虚拟地址，表示指令在程序地址空间中的位置，而 `00000517` 和 `00050513` 是这些位置上指令的机器码表示，而不是地址。
+
+程序在执行时需要将虚拟地址转换为物理地址，这一过程通常由内存管理单元（`MMU`）处理。在 `RISC-V` 中，`satp`（Supervisor Address Translation and Protection）寄存器用于控制地址转换和内存保护。`satp` 寄存器包含了页表的物理基地址，这是进行虚拟地址到物理地址转换的关键信息。
+
+当程序运行并访问内存时，以下步骤通常会发生：
+
+1. **虚拟地址生成**：程序中的指令如加载（`la`）会生成虚拟地址（如上述的 `0` 和 `4`）。
+2. **地址翻译**：CPU使用 `satp` 寄存器中的信息来将虚拟地址转换为物理地址。这个过程通常涉及查找页表，页表将虚拟地址空间映射到物理内存空间。
+3. **访问物理内存**：一旦虚拟地址被转换为物理地址，CPU就可以访问物理内存中的数据或指令。
+
+在这个过程中，`satp` 寄存器起着核心作用，它确保了程序中的虚拟地址可以正确地映射到物理内存地址，使得程序能够正确执行。
+
+---
+
+**接下来证明一下：**
+
+- **第一阶段：**第一个用户进程启动 `->`  `initcode.S`
+
+- **第二阶段：**`initcode.S` `->` `sys_exec` `->` `user/sh.c`
+
+这两个过程都会陷入到内核态，都是通过 `SRET` 让程序分别跳转到 `initcode.S` 和 `user/sh.c` 的。所以，我们可以猜测这两个过程最后执行 `SRET` 之前，**`SEPC` 的值都是 `0x0`，而 `SATP` 的值一定是不一样的**
+
+```shell
+hadoop@slave02:~/xv6-labs-2020$ make gdb 
+...
+0x0000000000001000 in ?? ()
+(gdb) b proc.c:229
+Breakpoint 1 at 0x80001ca0: file kernel/proc.c, line 229.
+(gdb) c
+Continuing.
+
+Breakpoint 1, userinit () at kernel/proc.c:229
+229       p->sz = PGSIZE;
+(gdb) p/x p->pagetable 		# 【第一阶段】页表的地址
+$1 = 0x87fac000
+(gdb) d 1
+(gdb) b proc.c:557
+Breakpoint 2 at 0x800019fe: file kernel/proc.c, line 557.
+(gdb) c
+Continuing.
+
+Breakpoint 2, forkret () at kernel/proc.c:557
+557       usertrapret();
+(gdb) s						# 进入 usertrapret
+usertrapret () at kernel/trap.c:92
+92        struct proc *p = myproc();
+(gdb) b trap.c:132
+Breakpoint 3 at 0x80002690: file kernel/trap.c, line 132.
+(gdb) c
+Continuing.
+
+Breakpoint 3, usertrapret () at kernel/trap.c:132
+132       ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);
+(gdb) d 2
+(gdb) p/x satp				# 【第一阶段】SATP 寄存器的值
+$2 = 0x8000000000087fac
+(gdb) p/x $sepc				# 【第一阶段】SEPC 寄存器的值
+$3 = 0x0
+```
+
+上面是【第一阶段】相关的寄存器的值，之后进入 `userret` 然后执行 `SRET`，秩序跳转到 `initcode.S`
+
+之后再看【第二阶段】
+
+- 按照【第一阶段】的流程，程序跳转到 `initcode.S` `->` `sys_exec` 陷入内核态（调用 `usertrap`），然后调用 `syscall()`，之后调用 `usertrapret`
+- 我们直接让程序跳转到 `syscall()` 内部，即 `exec()` 方法
+
+```shell
+(gdb) info b
+Num     Type           Disp Enb Address            What
+3       breakpoint     keep y   0x0000000080002690 in usertrapret at kernel/trap.c:132
+        breakpoint already hit 1 time
+(gdb) d 3
+(gdb) b exec.c:119
+Breakpoint 4 at 0x80004df0: file kernel/exec.c, line 119.
+(gdb) c
+Continuing.
+
+Breakpoint 4, exec (path=path@entry=0x3fffffdf10 "/init", argv=argv@entry=0x3fffffde10) at kernel/exec.c:119
+119       return argc; // this ends up in a0, the first argument to main(argc, argv)
+# 此时已经将【用户的第一个进程】的栈的相关内容替换为 _init 了
+(gdb) p path					# 可以发现是在调用 user/_init
+$4 = 0x3fffffdf10 "/init"
+(gdb) p/x p->pagetable 			# 【第二阶段】页表的地址
+$5 = 0x87fa5000
+(gdb) p/x p->trapframe->epc 	# 【第一阶段】SEPC 寄存器的值
+$6 = 0x0
+(gdb) d 4
+(gdb) b trap.c:132
+Breakpoint 5 at 0x80002690: file kernel/trap.c, line 132.
+(gdb) c
+Continuing.
+
+Breakpoint 5, usertrapret () at kernel/trap.c:132
+132       ((void (*)(uint64,uint64))fn)(TRAPFRAME, satp);
+(gdb) p/x $sepc					# 【第一阶段】SEPC 寄存器的值
+$7 = 0x0
+# 前面执行了 uint64 satp = MAKE_SATP(p->pagetable);
+(gdb) p/x satp
+$9 = 0x8000000000087fa5			# 【第一阶段】SATP 寄存器的值
+
+# 执行 satp 被当作第二个参数传递到了 userret 中
+# 在 userret 中执行 csrw satp, a1 将 satp 的值赋值给 SATP 寄存器
+```
+
+通过上面的流程可以发现，两次执行 `SRET` 之前 `SEPC` 寄存器的值都是 `0x0`，但是由于 `SATP` 寄存器是不同的，所以程序跳转到了不同的地方
+
+可以通过 `walkaddr(p->pagetable, p->trapframe->epc)` 将 `SEPC` 的虚拟地址翻译为物理地址：
+
+- **【第一阶段】**`SEPC = 0x0`，`SATP = 0x8000000000087fac`，`p->pagetable = 0x0000000087fac000`，`SEPC` 对应的物理地址是 `0x0000000087fa9000`
+- **【第二阶段】**`SEPC = 0x0`，`SATP = 0x8000000000087fa5`，`p->pagetable = 0x0000000087fa5000`，`SEPC` 对应的物理地址是 `0x0000000087fa2000`
+
+**其实这两个阶段是同一个进程**，只不过在 `exec()` 中将第一阶段的进程的栈清空了，用 `user/_init` 进行了替代
 
 ### 7. Lab1: RISC-V assembly
 
@@ -762,43 +912,67 @@ entry("uptime");
 
 
 
+**总结一下 `Lab3: Alarm` 的流程**
 
+- 就以 `test0` 为例
 
+```c++
+void
+periodic()
+{
+  count = count + 1;
+  printf("alarm!\n");
+  sigreturn();
+}
 
+// tests whether the kernel calls
+// the alarm handler even a single time.
+void
+test0()
+{
+  int i;
+  printf("test0 start\n");
+  count = 0;
+  sigalarm(2, periodic);
+  for(i = 0; i < 1000*500000; i++){
+    if((i % 1000000) == 0)
+      write(2, ".", 1);
+    if(count > 0)
+      break;
+  }
+  sigalarm(0, 0);
+  if(count > 0){
+    printf("test0 passed\n");
+  } else {
+    printf("\ntest0 failed: the kernel never called the alarm handler\n");
+  }
+}
+```
 
+主要分为三个过程：`sigalarm()`、时钟中断和 `sigreturn()`
 
+**`sigalarm()`**
 
+- 当执行 `sigalarm`，会触发 `trap`，通过 `alarmtest.asm:1067-1075` 可以看到，其中会执行 `ecall` 执行，程序会跳转到 `STVEC` 指向的地址 `0x3ffffff000`，也就是 `uservec`；然后将各种寄存器的内容保存到了 `p->trapframe` 中（寄存器 `SSCRATCH` 指向的就是 `p->trapframe`），然后通过 `ld t0, 16(a0)` 将 `usertrap` 的地址赋值给 `t0`，之后通过 `jr t0` 跳转到 `usertrap`
 
+- 进入到 `usertrap` 后，因为此时是因为调用 `sigalarm` 导致的  `system call`，所以 `SCAUSE` 为 `8`，然后执行 `syscall.c` 中的 `syscall()`，进而调用到 `sys_sigalarm()`
+- 在 `sys_sigalarm` 中，记录注册的回调（`p->handler`）和周期（`p->ticks`）；之后会执行 `usertrapret`，然后返回到用户态继续执行 `alarmtest.c` 的代码
 
+**时钟中断**
 
+- 时钟中断属于设备中断，同样会在陷入到内核态之前保存各寄存器的值，用于恢复现场；并且 `devintr()` 为 2
+- 当时钟中断触发此次等于 `p->ticks`，此时就需要调用之前注册的回调。**在调用之前，首先要保存之前（时钟中断陷入内核态之前保存的寄存器的值）**，具体原因之后再说
 
+**`sigreturn()`**
 
+- 保存好后调用对应的回调，即 `alarmtest.c` 中的 `periodic()` ，然后会调用 `sigreturn()`。此时会触发 `system call` 进而陷入到内核态，这里的流程和上面调用 `sigalarm()` 的流程是一样的，同样是 **保存当前个寄存器的值，用于恢复现场使用**、陷入内核态。此时 `p->trapframe` 的值是调用 `sigreturn()` 陷入内核态之前各寄存器的值。在这之前，也就是如果没有调用 `sigreturn()`，那么 `p->trapframe` 的值是时钟中断触发时陷入内核态前各寄存器的值。所以会发生覆盖的情况，**这也就是为什么在调用回调之前要保存 `p->trapframe` 的原因**
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- 之后，会进入到 `sys_sigreturn()`，该函数将之前时钟中断各寄存器的值对当前 `p->trapframe` 进行覆盖（当前的 `p->trapframe` 是调用 `sigreturn()` 陷入内核态之前的值）
+  - **解释一下为什么？**
+    - 首先思考，是什么原因导致处理内核态的线程调用回调的？是因为 `p->trapframe->epc = (uint64)p->handler;`，所以 `SPEC` 是至关重要的，因为当执行 `SRET` 后 `SEPC` 的值会赋值给 `PC`，然后程序会执行 `PC` 所指的地方。所以程序才会调用回调。但是在进行 `p->trapframe->epc = (uint64)p->handler` 之前我们应该保存当前的 `p->trapframe->epc`，因为此时 `epc` 就是时钟中断陷入内核态之前保存的，我们暂且称他为 `alarm-epc`
+    - 那么当回调完成，应该继续执行之前的代码，也就是时钟中断结束后继续执行时钟中断后的代码（可以把时钟中断想象成一个函数），所以我们需要再次拿到 `alarm-epc`，而它就被存储在 `p->saved_epc` 中，所以 `sys_sigreturn` 中就需要恢复各寄存器的值
+    - 这样当 `sys_sigreturn` 执行完成，然后执行 `SRET` 后程序就会跳转到 `alarm-epc` 所指的地址，也就是说时钟中断结束了，继续执行下面的代码
+  - 需要注意一个细节是：在 `sys_sigreturn` 中执行了 `p->inhandler = 0`；这样当下一次时钟中断次数等于 `p->interval` 时才会继续调用回调
 
 
 

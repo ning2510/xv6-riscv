@@ -237,6 +237,8 @@ aaa 0x0000000000000000 0x0000000000200000
 
 分析完毕，理解了上面的内容，则可以更好的理解页表结构
 
+
+
 ### 9. Lab1: Print a page table
 
 #### 9.1 虚拟地址结构
@@ -785,3 +787,144 @@ for(argc = 0; argv[argc]; argc++) {
 + u2kvmcopy(p->pagetable, p->kernelpgt, 0, p->sz);
   // prepare for the very first "return" from kernel to user.
 ```
+
+### 12. 用户栈和内核栈 (重要)
+
+通过这三个实验，你可能会有疑问？栈有什么用？为什么还要有用户栈、内核栈之分？上面的三个实验到底想干嘛？
+
+#### 12.1 内核栈
+
+<img src="./images/7.png" style="zoom:40%;" />
+
+在没进行上面的实验之前：
+
+- 每个线程有一个页表 `pagetable`，这个页表是用户页表，在内核态中是不能使用的
+- 内核态中有一个全局的内核页表 `kernel_pagetable` (在 `kernel/vm.c:14`)
+- 每当进程从用户态陷入到内核态时，`SATP` 寄存器会指向 `kernel_pagetable`，同时 `sp` 寄存器会指向 `kstack`
+  - `trampoline.S:33` 中有 `sd sp, 48(a0)`，即将用户态的 `sp` 寄存器存储到了 `p->trapframe->sp` 中。同时 `trampoline.S:68` 中有 `ld sp, 8(a0)`，即将 `p->trapframe->kernel_sp` 赋值给了 `sp` 寄存器
+  - `trap.c:105` 中有 `p->trapframe->kernel_sp = p->kstack + PGSIZE;` 此时 `p->kstack` 是栈顶 (低地址)，而 `p->kstack + PGSIZE` 是栈底 (高地址)，因为栈地址是向下增长的
+  - `p->kstack` 是在 `proc.c` 中的 `procinit()` 申请的
+
+- 之后在内核态定义的变量都会占用 **内核栈 (`k->stack`) 的内存**
+
+- 而内核态中的页表中是没有 **用户态** 的信息的，假设 `va` 是用户态的虚拟地址，而内核态想进行读写时需要使用 **用户态页表 (`p->pagetable`)** 进行翻译后才可以
+
+所以问题来了，这样翻译太麻烦了，每操作一次就要翻译一次
+
+于是有了这三个实验
+
+<img src="./images/8.png" style="zoom:40%;" />
+
+#### 12.2 用户栈
+
+**然后再说一下用户栈的作用，分两种情况：**
+
+- 用户的第一个进程
+- 执行 `ls` 等命令后调用 `exec` 生成的进程
+
+其中可以归为一种的，因为用户第一个进程最后还是会执行 `sh` 命令，然后调用 `exec` 生成新的进程
+
+所以我们直接看 `exec()` 即可
+
+<img src="./images/73.png" style="zoom:75%;" />
+
+直接看上面的图就行
+
+`exec()` 执行完成后也就是 `trap.c` 的 `usertrap()` 中 `syscall()` 执行完成了
+
+然后执行 `usertrapret()`
+
+最后进入到 `trampline.S`，在 `trampline.S:106` 中有 `ld sp, 48(a0)`，也就是将 `p->trapframe->sp` 赋值给了 `sp` 寄存器，**我们令此时 `sp` 寄存器的值为 `A`**
+
+最后调用 `sret` 就进入到了 `user/ls.asm` 中了
+
+```assembly
+0000000000000274 <main>:
+
+int
+main(int argc, char *argv[])
+{
+ 274:	1101                	add	sp,sp,-32	# --- 注意这里
+ 276:	ec06                	sd	ra,24(sp)
+ 278:	e822                	sd	s0,16(sp)
+ 27a:	e426                	sd	s1,8(sp)
+ 27c:	e04a                	sd	s2,0(sp)
+ 27e:	1000                	add	s0,sp,32
+  int i;
+
+  if(argc < 2){
+ 280:	4785                	li	a5,1
+ 282:	02a7d963          	bge	a5,a0,2b4 <main+0x40>
+ 286:	00858493          	add	s1,a1,8
+ 28a:	ffe5091b          	addw	s2,a0,-2
+ 28e:	02091793          	sll	a5,s2,0x20
+ 292:	01d7d913          	srl	s2,a5,0x1d
+ 296:	05c1                	add	a1,a1,16
+ 298:	992e                	add	s2,s2,a1
+```
+
+**当程序马上要执行 `add	sp,sp,-32` 时，也就是还没有执行。此时输出寄存器 `sp`，它的值就是 `A`**
+
+#### 12.3 实验的作用
+
+上面解释了用户栈和内核栈，那么下面我们简单说一下实验的作用
+
+首先在 `struct proc` 中添加了一个字段 `pagetable_t kernelpgt;`
+
+目的是让 `kernelpgt` 代替 `kernel_pagetable` 成为内核栈。这样每个进程都会有一个属于自己的内核栈，而不是所有进程共用一个内核栈
+
+然后通过 `pkvminit()` 使得 `kernelpgt` 拥有和 `kernel_pagetable` 相同的映射
+
+对于 `kstack` 来说，原来是所有的 `kstack` 都映射到 `kernel_pagetable` 中，而现在每个进程只把该进程对应的 `kstack` 映射到 `kernelpgt`
+
+**上面是 `Lab2` 的内容**
+
+但是！！！到目前为止，做这些有什么用？和原来的区别还是一样的，访问用户态的虚拟地址还是要通过用户态页表，而且现在这样还多申请了很多页表 `kernelpgt` 浪费了空间
+
+所以要继续看 **`Lab3` 的内容**，这才是关键！
+
+**最重要的是 `u2kvmcopy()`**
+
+```c++
+void
+u2kvmcopy(pagetable_t pagetable, pagetable_t kernelpgt, uint64 oldsz, uint64 newsz)
+{
+  pte_t *from, *to;
+  uint64 va, pa;
+  uint flags;
+
+  if(newsz < oldsz)
+    return ;
+
+  oldsz = PGROUNDUP(oldsz);
+  for(va = oldsz; va < newsz; va += PGSIZE) {
+    if((from = walk(pagetable, va, 0)) == 0)
+      panic("u2kvmcopy: walk");
+
+    if((to = walk(kernelpgt, va, 1)) == 0)
+      panic("u2kvmcopy: walk");
+    
+    pa = PTE2PA(*from);
+    flags = (PTE_FLAGS(*from)) & (~PTE_U);
+    *to = PA2PTE(pa) | flags;
+  }
+}
+```
+
+`u2kvmcopy` 将用户态页表中的所有内容都映射到了 `kernelpgt` 中
+
+用户态页表的虚拟地址是 `0~p->sz`
+
+那么也是从内核态页表 `kernelpgt` 虚拟地址 0 开始映射的，也就是下图红色部分
+
+<img src="./images/74.png" style="zoom:50%;" />
+
+那么你可能就会有疑问，如果用户态进程占用太多空间，以至于将用户态页表映射到内核态时，虚拟地址超过了 `0x2000000`，也就是 `CLINT` 的地址，是不是就覆盖了之前对 `CLINT` 的映射
+
+对的，但是 **一个进程的大小** 是不会那么大的，`0x2000000` 就是 `33554432` 字节
+
+通过上面的操作后，当内核态想对用户态的地址读写时，直接通过 `kernelpgt` 翻译即可
+
+只不过要在特定位置即使对 `kernelpgt` 更新用户态页表的映射
+
+我想你通过上面的内容可以回答一开始的问题了
